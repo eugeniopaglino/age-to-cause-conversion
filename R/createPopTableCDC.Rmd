@@ -1,0 +1,69 @@
+---
+title: "Building Population Tables from CDC and ACS"
+author: "Eugenio Paglino"
+output: html_document
+---
+
+```{r, echo=F, include=F}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+# Loading necessary packages
+library(here)
+library(haven)
+library(gt)
+library(tidyverse)
+
+# Set seed for the Rmd
+set.seed(42)
+```
+
+```{r}
+# Do not rely on this to completely clean your environment
+# Better to do a full restart of R before running
+rm(list=ls())
+
+i_am('R/createPopTableCDC.Rmd')
+
+inDir <- here('data','input')
+intermediateDir <- here('data','output')
+```
+
+```{r}
+popData <- list.files(
+  here(inDir,'CDCPopEstimates'),
+  pattern = "*.txt",
+  full.names = TRUE
+  ) %>%
+  map_dfr(
+    ~ data.table::fread(
+    .x,
+    na.strings = c("Missing", "Suppressed", "Not Applicable"),
+    keepLeadingZeros = TRUE))
+```
+
+```{r}
+popData <- popData %>%
+  select(year=`Yearly July 1st Estimates Code`,sex=Gender,
+         age=`Ten-Year Age Groups`,pop=Population,state=States) %>%
+  mutate(
+    age = str_remove_all(age,'\\s'),
+    age = str_remove_all(age,'year[s]?'))
+```
+
+```{r}
+popData <- popData %>%
+  filter(age != 'NotStated') %>%
+  group_by(state,year,age,sex) %>%
+  summarise(pop=sum(pop)) %>%
+  ungroup()
+```
+
+```{r}
+popData %>% arrow::write_feather(here(intermediateDir,'popTable.feather'))
+```

@@ -1,0 +1,213 @@
+---
+title: "Create Mortality Table"
+author: "Eugenio Paglino"
+output: html_document
+---
+
+```{r, echo=F, include=F}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+# Loading necessary packages
+library(glue)
+library(lubridate)
+library(here)
+library(data.table)
+library(tidyverse)
+
+# Set seed for the Rmd
+set.seed(42)
+```
+
+```{r}
+# Do not rely on this to completely clean your environment
+# Better to do a full restart of R before running
+rm(list=ls())
+
+i_am('R/cleanMortData.Rmd')
+
+inDir <- here('data','input')
+intermediateDir <- here('data','output')
+```
+
+```{r}
+read.mort.data <- function(file,year) {
+  
+  mortData <- read_fwf(file,
+                       col_positions = fwf_cols(year=c(102,105),
+                                                month=c(65,66),
+                                                stateOccurrence=c(21,22),
+                                                countyOccurrence=c(23,25),
+                                                stateResidence=c(29,30),
+                                                countyResidence=c(35,37),
+                                                sex=c(69,69),
+                                                race=c(489,490),
+                                                age=c(79,80),
+                                                bpl=c(59,60),
+                                                hispanic=c(484,486),
+                                                ICD10Code=c(146,149)),
+                       col_types = cols(age=col_integer()))
+  
+  return(mortData)
+  
+}
+
+combine.mort.data <- function(files) {
+  
+  for (file in files) {
+    
+    if (file == files[1]) {
+      mortData <- read.mort.data(file)
+    } else {
+      mortData <- mortData %>%
+        add_row(read.mort.data(file))
+    }
+    
+  }
+  
+  return(mortData)
+  
+}
+```
+
+```{r}
+files <- sapply(2014:2019,function(x) here(inDir,glue('mort{x}'),glue('MULT{x}USAllCnty.txt')))
+mortData <- combine.mort.data(files)
+```
+
+```{r}
+mortData <- mortData %>%
+  mutate(time = make_date(year,month),
+         sex = case_when(sex == 'M' ~ 'Male',
+                                sex == 'F' ~ 'Female'),
+         race = as.numeric(race),
+         race = case_when(race==1 ~ 'White',
+                                 race==2 ~ 'Black',
+                                 race==3 ~ 'AIAN',
+                                 between(race,4,10) ~ 'Asian',
+                                 between(race,11,14) ~ 'NHOPI',
+                                 TRUE ~ 'Other or Multiple Race'),
+         age = factor(as.numeric(age),
+                      levels=1:12,
+                      labels=c('<1','1-4','5-14','15-24',
+                               '25-34','35-44','45-54',
+                               '55-64','65-74','75-84',
+                               '85+','Not Stated')),
+         hispanic = case_when(hispanic < 200 ~ 'Non-Hispanic',
+                                     between(hispanic,200,299) ~ 'Hispanic',
+                                     hispanic >= 996 ~ 'Unknown'),
+         raceEthnicity = case_when(hispanic == 'Hispanic' ~ 'Hispanic',
+                                          race == 'White' & hispanic == 'Non-Hispanic' ~ 'White',
+                                          race == 'Black' & hispanic == 'Non-Hispanic' ~ 'Black',
+                                          race == 'AIAN' & hispanic == 'Non-Hispanic' ~ 'AIAN',
+                                          race == 'Asian' & hispanic == 'Non-Hispanic' ~ 'Asian', 
+                                          race == 'NHOPI' & hispanic == 'Non-Hispanic' ~ 'NHOPI',
+                                          race == 'Other or Multiple Race' & hispanic == 'Non-Hispanic' ~ 'Other or Multiple Race'),
+         foreign=case_when(bpl %in% c('CC','MX','CU','YY','ZZ') ~ 'Foreign-Born',
+                                  TRUE ~ 'US-Born')) %>%
+  select(-bpl)
+```
+
+```{r}
+mortData <- mortData %>%
+  filter(age != 'Not Stated',
+         hispanic != 'Unknown',
+         !(stateResidence %in% c('PR','VI','GU','AS','MP','ZZ','XX')))
+```
+
+```{r}
+mortData <- mortData %>%
+  mutate(
+    ICDMainCode = str_sub(ICD10Code,1,3),
+    ICDLetter = str_sub(ICD10Code,1,1),
+    ICDNumber = as.numeric(str_sub(ICD10Code,2,4)),
+    ICDMainNumber = as.numeric(str_sub(ICD10Code,2,3)),
+    causeOfDeath = factor(
+      case_when(
+        ICD10Code %in% c('E244','G312','G621','G72.1','I426', 
+                         'K292','K852','K860','R780') ~ 22,
+        ICDMainCode %in% c('F10','K70','X45','X65','Y15') ~ 22,
+        ICDLetter == 'B' & between(ICDMainNumber,20,24) ~ 1,
+        ICDLetter == 'A' | (ICDLetter == 'B' & !between(ICDMainNumber,20,24)) ~ 2,
+        ICDMainCode == 'C22' ~ 3,
+        ICDMainCode %in% c('C33','C34') ~ 4,
+        ICDMainCode %in% c('C18','C19','C20','C21','C50','C53','C61') ~ 5,
+        ICDLetter == 'C' & !(ICDMainNumber %in% c(18:21,50,53,61)) ~ 6,
+        ICDLetter == 'D' & ICDMainNumber <= 48 ~ 6,
+        ICDLetter == 'F' & between(ICDMainNumber,1,99) ~ 7,
+        ICDLetter == 'G' & between(ICDMainNumber,0,99)  & ICDMainCode != 'G30' ~ 8,
+        ICDMainCode == 'G30' ~ 9,
+        ICDLetter == 'I' & between(ICDMainNumber,10,15) ~ 10,
+        ICDLetter == 'I' & !between(ICDMainNumber,10,15) ~ 11,
+        ICDLetter == 'J' & between(ICDMainNumber,9,18) ~ 12,
+        ICDLetter == 'J' & !between(ICDMainNumber,9,18) & ICDMainNumber != 99 ~ 13,
+        ICDLetter == 'K' & between(ICDMainNumber,0,92) ~ 14,
+        ICDLetter == 'E' & between(ICDMainNumber,10,14) ~ 15,
+        ICDLetter == 'E' & between(ICDMainNumber,0,88) & !between(ICDMainNumber,10,14) ~ 16,
+        ICDLetter == 'N' & between(ICDMainNumber,0,98) ~ 17,
+        ICDLetter == 'P' & between(ICDMainNumber,0,96) ~ 18,
+        ICDLetter == 'Q' & between(ICDMainNumber,0,99) ~ 18,
+        ICDLetter == 'X' & between(ICDMainNumber,86,99) ~ 19,
+        ICDLetter == 'Y' & (between(ICDMainNumber,0,9) | ICDMainCode == 'Y871') ~ 19,
+        ICDMainCode == 'Y870' | (ICDLetter == 'X' & between(ICDMainNumber,66,84)) ~ 20,
+        ICDLetter == 'X' & ICDMainNumber %in% c(40:44,60:64,85) ~ 21,
+        ICDLetter == 'Y' & between(ICDMainNumber,10,14) ~ 21,
+        ICDMainCode == 'Y85' | (ICDLetter == 'V' & between(ICDMainNumber,1,99)) ~ 23,
+        ICDLetter %in% c('V','W','X','Y') ~ 24,
+        ICDLetter == 'R' & between(ICDMainNumber,0,99) ~ 25,
+        ICD10Code == 'U071' ~ 26,
+        TRUE ~ 27),
+      levels=1:28,
+      labels=c('HIV/AIDS','Other infectious and\nparasitic diseases',
+               'Liver cancer','Lung cancer',
+               'Breast, prostate, colorectal,\nand cervical cancer',
+               'All other cancers','Mental disorders',
+               "Nervous system, excl. Alzheimer's","Alzheimer's disease",
+               'Hypertensive heart disease',
+               'Circulatory diseases,\nexcl. Hypertensive heart disease',
+               'Respiratory diseases\nexcl. Influenza and pneumonia',
+               'Influenza and pneumonia','Diseases of the digestive system',
+               'Diabetes',
+               'Endocrine, nutritional,\nand metabolic diseases excl. Diabetes',
+               'Diseases of the genitourinary system',
+               'Perinatal conditions\nand congenital anomalies','Homicide',
+               'Suicide','Drug overdose','Alcohol-induced','Transport accidents',
+               'Other external causes','Symptoms, signs,\nand ill-defined conditions',
+               'COVID-19',
+               'All other causes',
+               'Total')))
+```
+
+```{r}
+mortTable <- data.table(mortData)[,
+                       .(deaths = .N),
+                       by=.(stateResidence,year,sex,age,causeOfDeath)]
+```
+
+```{r}
+mortTable <- mortTable %>%
+  complete(stateResidence,year,sex,age,causeOfDeath,fill=list(deaths=0)) %>%
+  filter(age!='Not Stated')
+```
+
+```{r}
+mortTable %>%
+  filter(year==2014,sex=='Male',stateResidence=='CA') %>%
+  mutate(residual=if_else(causeOfDeath=='All other causes','Other','Selected')) %>%
+  ggplot() +
+  geom_line(mapping=aes(x=age,y=deaths,group=causeOfDeath,
+                        alpha=residual,color=residual,linewidth=residual)) +
+  scale_color_manual(breaks=c('Other','Selected'),values=c('red','black')) + 
+  scale_linewidth_manual(breaks=c('Other','Selected'),values=c(0.9,0.5)) + 
+  scale_alpha_manual(breaks=c('Other','Selected'),values=c(1,0.3)) +
+  theme_minimal()
+```
+
+```{r}
+mortTable %>% arrow::write_feather(here(intermediateDir,'mortDataClean.feather'))
+```

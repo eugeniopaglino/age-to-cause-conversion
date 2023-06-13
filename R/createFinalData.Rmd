@@ -1,0 +1,57 @@
+---
+title: "Creating the Final Data"
+author: "Eugenio Paglino"
+output: html_document
+---
+
+```{r, echo=F, include=F}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+# Loading necessary packages
+library(here)
+library(tidyverse)
+
+# Set seed for the Rmd
+set.seed(42)
+```
+
+```{r}
+# Do not rely on this to completely clean your environment
+# Better to do a full restart of R before running
+rm(list=ls())
+
+i_am('R/createFinalData.Rmd')
+
+inDir <- here('data','input')
+intermediateDir <- here('data','output')
+```
+
+```{r}
+# These counties are in the mortality data but not in the population data
+# "02013" "02016" "02068" "02105" "02130" "02164" "02188" "02198" 
+# "02230" "02270" "02275" "02282" "02290" "04012" "08001" "08013" 
+# "08014" "08123" "30067" "46113" "51515"
+
+mortData <- arrow::read_feather(here(intermediateDir,'mortDataClean.feather'))
+popData <- arrow::read_feather(here(intermediateDir,'popTable.feather'))
+```
+
+```{r}
+finalData <- mortData %>%
+  rename(state_abbr=stateResidence) %>%
+  left_join(USAboundaries::state_codes,by='state_abbr') %>%
+  select(-c(state_abbr,state_code,jurisdiction_type)) %>%
+  rename(state=state_name) %>%
+  left_join(popData,by=c('state','year','age','sex')) %>%
+  drop_na(pop)
+```
+
+```{r}
+finalData %>% arrow::write_feather(here(intermediateDir,'finalData.feather'))
+```
