@@ -25,7 +25,7 @@ brsim_dt <-
               fread( i ) %>%
               .[ TIPOBITO != 1 , 
                  .(
-                   stateResidence = substr( CODMUNRES, 1, 2 ),
+                   state          = substr( CODMUNRES, 1, 2 ),
                    year           = DTOBITO %% 10000,
                    sex            = ifelse( SEXO == 2, 'Female',
                                             ifelse( SEXO == 1, 'Male', NA ) ),
@@ -100,7 +100,7 @@ brsim_dt <-
                          'Total' ) ) ] %>%
               .[ ,
                  .( deaths = .N ),
-                 by = .( stateResidence, year, sex, age, causeOfDeath ) ]
+                 by = .( state, year, sex, age, causeOfDeath ) ]
             
           } ) %>%
   rbindlist()
@@ -109,3 +109,160 @@ library(here)
 inDir <- here('data','input')
 intermediateDir <- here('data','output')
 brsim_dt %>% arrow::write_feather(here(intermediateDir,'mortDataCleanBR.feather'))
+
+finalData <-  setDT( arrow::read_feather(here(intermediateDir,'finalData.feather')) )
+
+finalData$age %>% unique
+
+# put ages on the same US format
+brsim_dt[ , agegrp := cut( age,
+                           breaks = c( 0, 1, seq( 5, 85, 10 ), 200 ),
+                           labels = c( finalData$age %>% unique ),
+                           right = FALSE,
+                           include.lowest = TRUE ) ]
+
+mortDataBR <- 
+  brsim_dt[ !is.na( sex ) & !is.na( age ) & year %in% 2009:2011, 
+            .( deaths = sum( deaths ) / 3 ), 
+            .( sex, age = agegrp, causeOfDeath ) ] %>%
+  setorder( sex, age, causeOfDeath )
+
+
+require(wpp2022)
+data('pop1dt')
+
+popDataBR <- 
+  popAge1dt[ country_code == 76 ] %>%
+  .[ , agegrp := cut( age,
+                      breaks = c( 0, 1, seq( 5, 85, 10 ), 200 ),
+                      labels = c( finalData$age %>% unique ),
+                      right = FALSE,
+                      include.lowest = TRUE ) ] %>%
+  .[ , .( Male = sum( popM ) * 1000, Female = sum( popF ) * 1000 ), .( year, age = agegrp ) ] %>%
+  data.table::melt(
+    id.vars = c( 'year', 'age' ),
+    measure.vars = c( 'Male', 'Female' ),
+    value.name = 'pop',
+    variable.name = 'sex'
+  )
+
+finalDataBR <- 
+  mortDataBR %>%
+  merge(
+    popDataBR[ year == 2010, .( sex, age, pop ) ],
+    by = c( 'sex', 'age' )
+  )
+
+
+### Model
+ageSpecificRates <- finalData %>%
+  group_by(state,year,sex,age) %>%
+  summarise(deaths=sum(deaths),
+            pop=max(pop),
+            logm=log(deaths/pop)) %>%
+  ungroup() %>%
+  select(-c(deaths,pop)) %>%
+  pivot_wider(values_from = logm, names_from = age,names_prefix = 'logm')
+
+finalData <- finalData %>%
+  filter(!(causeOfDeath %in% c('COVID-19','Total','HIV/AIDS')),
+         !(state %in% c('Vermont','North Dakota','Wyoming'))) %>%
+  group_by(state,year,sex, causeOfDeath) %>%
+  summarise(deaths=sum(deaths),
+            pop=max(pop),
+            logm=log(deaths/pop)) %>%
+  ungroup() %>%
+  left_join(ageSpecificRates,by=c('state','year','sex'))
+
+trainData <- finalData 
+
+ageSpecificRatesBR <- finalDataBR %>%
+  group_by(sex,age) %>%
+  summarise(deaths=sum(deaths),
+            pop=max(pop),
+            logm=log(deaths/pop)) %>%
+  ungroup() %>%
+  select(-c(deaths,pop)) %>%
+  pivot_wider(values_from = logm, names_from = age,names_prefix = 'logm')
+
+finalDataBR <- finalDataBR %>%
+  filter(!(causeOfDeath %in% c('COVID-19','Total','HIV/AIDS'))) %>%
+  group_by(sex, causeOfDeath) %>%
+  summarise(deaths=sum(deaths),
+            pop=max(pop),
+            logm=log(deaths/pop)) %>%
+  ungroup() %>%
+  left_join(ageSpecificRatesBR,by=c('sex'))
+
+testData <- finalDataBR
+# Construct data frame of state abbreviations + divisions, plus DC
+linearModel <- lm(logm ~ 1 + `logm<1` + `logm1-4` + `logm5-14` + `logm15-24` + 
+                    `logm25-34` + `logm35-44` + `logm45-54` + `logm55-64` + 
+                    `logm65-74` + `logm75-84` + `logm85+` +
+                    causeOfDeath +
+                    causeOfDeath:`logm<1` + causeOfDeath:`logm1-4` + 
+                    causeOfDeath:`logm5-14` + causeOfDeath:`logm15-24` + 
+                    causeOfDeath:`logm25-34` + causeOfDeath:`logm35-44` + 
+                    causeOfDeath:`logm45-54` + causeOfDeath:`logm55-64` + 
+                    causeOfDeath:`logm65-74` + causeOfDeath:`logm75-84` + 
+                    causeOfDeath:`logm85+`,
+                  data = trainData)
+
+trainData <- trainData %>%
+  mutate(prediction = predict(linearModel))
+
+trainData %>%
+  ggplot() +
+  geom_point(mapping=aes(x=logm,y=prediction),alpha=0.3) +
+  facet_wrap(~causeOfDeath) +
+  coord_equal(xlim = c(-10,-3),ylim=c(-10,-3))
+
+trainData %>%
+  mutate(predDeaths = exp(prediction)*pop) %>%
+  group_by(causeOfDeath) %>%
+  summarise(deaths=sum(deaths),
+            predDeaths=sum(predDeaths)) %>%
+  ungroup() %>%
+  mutate(prop=deaths/sum(deaths),
+         predProp=predDeaths/sum(predDeaths))
+
+testData <- testData %>%
+  mutate(prediction = predict(linearModel,testData))
+
+testData %>%
+  ggplot() +
+  geom_point(mapping=aes(x=logm,y=prediction),alpha=0.3) +
+  facet_wrap(~causeOfDeath) +
+  coord_equal(xlim = c(-10,-3),ylim=c(-10,-3))
+
+propData <- testData %>%
+  mutate(predDeaths = exp(prediction)*pop) %>%
+  group_by(causeOfDeath) %>%
+  summarise(deaths=sum(deaths),
+            predDeaths=sum(predDeaths)) %>%
+  ungroup() %>%
+  mutate(prop=deaths/sum(deaths),
+         predProp=predDeaths/sum(predDeaths))
+
+require(ggrepel)
+predVsObsProps <- propData %>%
+  ggplot() +
+  geom_abline(intercept = 0,slope=1) +
+  geom_point(mapping=aes(x=prop,y=predProp)) +
+  geom_text_repel(mapping=aes(x=prop,y=predProp,label=causeOfDeath),
+                  min.segment.length=0) +
+  coord_trans(x='log10',y='log10') +
+  labs(y='Predicted Proportion of All Deaths',
+       x='Observed Proportion of All Deaths') +
+  theme_minimal()
+
+propData %>%
+  as.data.table %>%
+  .[ , diff := round( 100 * ( predProp - prop ), 2 ) ] %>%
+  head( 30 ) %>%
+  setorder( diff ) %>%
+  .[ , .( causeOfDeath, obs = round( prop * 100, 1 ), pred = round( predProp * 100, 1 ), diff ) ]
+
+propData %>%
+  as.data.table %>% 
+  .[ causeOfDeath %in% c( 'Drug overdose', 'Suicide', 'Other external causes', 'Transport accidents', 'Homicide' )]
