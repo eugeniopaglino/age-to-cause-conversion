@@ -36,7 +36,9 @@ intermediateDir <- here('data','output')
 
 ```{r}
 
-input_dt = arrow::read_feather( here( intermediateDir, 'final_input_clean.feather' ) ) 
+input_dt = 
+  arrow::read_feather( here( intermediateDir, 'final_input_clean.feather' ) ) %>%
+  .[ !( cause_of_death %in% c( 'COVID-19', 'Total', 'HIV/AIDS' ) ) ]
 
 ```
 
@@ -44,91 +46,78 @@ input_dt = arrow::read_feather( here( intermediateDir, 'final_input_clean.feathe
 logmx_dt =
   merge(
     input_dt %>% copy %>%
-        .[ , 
-           .( nDx = sum( nDx ),
-              Ex  = max( Ex ) ),
+      .[ !( state %in% c( 'Vermont', 'North Dakota', 'Wyoming' ) ) ] %>%
+      .[ , 
+         .( nDx = sum( nDx ),
+            Ex  = max( Ex ) ),
            .( country, state, year, sex, cause_of_death ) ] %>%
-  .[ , log10mx := log10( nDx / Ex ) ],
+      .[ , logmx := log( nDx / Ex ) ],
   input_dt %>% copy %>%
-  .[ !( cause_of_death %in% c( 'COVID-19', 'Total', 'HIV/AIDS' ) ) & 
-       !( state %in% c( 'Vermont', 'North Dakota', 'Wyoming' ) ) ] %>%
-  .[ , log10mx := log10( nDx / Ex ) ] %>%
+  .[ !( state %in% c( 'Vermont', 'North Dakota', 'Wyoming' ) ) ] %>%
+  #.[ , nDx := ifelse( nDx == 0, 0.1, nDx ) ] %>%
+    .[ , 
+         .( nDx = sum( nDx ),
+            Ex  = max( Ex ) ),
+           .( country, state, year, sex, age_group ) ] %>%
+  .[ , logmx := log( nDx / Ex ) ] %>%
   data.table::dcast(
-    country + state + year + sex + cause_of_death ~ age_group,
-    value.var = 'log10mx'
+    country + state + year + sex ~ age_group,
+    value.var = 'logmx'
     ),
-  by = c( 'country', 'state', 'year', 'sex', 'cause_of_death' )
+  by = c( 'country', 'state', 'year', 'sex' )
   )
 ```
+
 ```{r}
 set.seed(42)
 
-selinput_dt = input_dt[ country == 'US', ]
+selinput_dt = logmx_dt[ country == 'US', ]
 
 states = unique( selinput_dt$state )
-states <- unique(input_dt$state)
-randStates <- sample(states,length(states))
+
+randStates <- sample( states, length( states )) 
 testStates <- randStates[1:floor(length(states)/4)]
 trainStates <- randStates[-1:-floor(length(states)/4)]
 ```
 
-```{r}
-finalData <- finalData %>%
-  filter(!(causeOfDeath %in% c('COVID-19','Total','HIV/AIDS')),
-         !(state %in% c('Vermont','North Dakota','Wyoming'))) %>%
-  group_by(state,year,sex, causeOfDeath) %>%
-  summarise(deaths=sum(deaths),
-            pop=max(pop),
-            logm=log(deaths/pop)) %>%
-  ungroup() %>%
-  left_join(ageSpecificRates,by=c('state','year','sex'))
-```
 
 ```{r}
-set.seed(42)
-states <- unique(finalData$state)
-randStates <- sample(states,length(states))
-testStates <- randStates[1:floor(length(states)/4)]
-trainStates <- randStates[-1:-floor(length(states)/4)]
-```
-
-```{r}
-trainData <- finalData %>%
-  filter(state %in% trainStates)
-
-testData <- finalData %>%
-  filter(state %in% testStates)
+trainData = selinput_dt[ state %in% trainStates, ]
+testData = selinput_dt[ state %in% testStates, ]
 ```
 
 ```{r}
 # Construct data frame of state abbreviations + divisions, plus DC
-linearModel <- lm(logm ~ 1 + `logm<1` + `logm1-4` + `logm5-14` + `logm15-24` + 
-                    `logm25-34` + `logm35-44` + `logm45-54` + `logm55-64` + 
-                    `logm65-74` + `logm75-84` + `logm85+` +
-                    causeOfDeath +
-                    causeOfDeath:`logm<1` + causeOfDeath:`logm1-4` + 
-                    causeOfDeath:`logm5-14` + causeOfDeath:`logm15-24` + 
-                    causeOfDeath:`logm25-34` + causeOfDeath:`logm35-44` + 
-                    causeOfDeath:`logm45-54` + causeOfDeath:`logm55-64` + 
-                    causeOfDeath:`logm65-74` + causeOfDeath:`logm75-84` + 
-                    causeOfDeath:`logm85+`,
-                  data = trainData)
+linearModel <- 
+  lm(
+    logmx ~ 1 + `<1` + `1-4` + `5-14` + `15-24` +
+       `25-34` + `35-44` + `45-54` + `55-64` + 
+       `65-74` + `75-84` + `85+` +
+       cause_of_death +
+       cause_of_death:`<1` + cause_of_death:`1-4` + 
+       cause_of_death:`5-14` + cause_of_death:`15-24` + 
+       cause_of_death:`25-34` + cause_of_death:`35-44` + 
+       cause_of_death:`45-54` + cause_of_death:`55-64` + 
+       cause_of_death:`65-74` + cause_of_death:`75-84` + 
+       cause_of_death:`85+`,
+     data = trainData[ cause_of_death != 'Garbage Codes', ] )
 ```
 
 ```{r}
-trainData <- trainData %>%
+trainData2 <- trainData[ cause_of_death != 'Garbage Codes', ] %>%
   mutate(prediction = predict(linearModel))
 ```
 
 ```{r}
-trainData %>%
+trainData2 %>%
   ggplot() +
-  geom_point(mapping=aes(x=logm,y=prediction),alpha=0.3) +
-  facet_wrap(~causeOfDeath) +
+  geom_point(mapping=aes(x=logmx,y=prediction),alpha=0.3) +
+  facet_wrap(~cause_of_death) +
   coord_equal(xlim = c(-10,-3),ylim=c(-10,-3))
 ```
 
 ```{r}
+trainData[ cause_of_death == 'Garbage Codes', ]
 trainData %>%
   mutate(predDeaths = exp(prediction)*pop) %>%
   group_by(causeOfDeath) %>%
@@ -154,10 +143,10 @@ testData %>%
 ```
 
 ```{r}
-propData <- testData %>%
-  mutate(predDeaths = exp(prediction)*pop) %>%
-  group_by(causeOfDeath) %>%
-  summarise(deaths=sum(deaths),
+propData <- trainData[ cause_of_death == 'Garbage Codes', ] %>%
+  mutate(predDeaths = exp(prediction)*Ex) %>%
+  group_by(cause_of_death) %>%
+  summarise(deaths=sum(nDx),
             predDeaths=sum(predDeaths)) %>%
   ungroup() %>%
   mutate(prop=deaths/sum(deaths),
