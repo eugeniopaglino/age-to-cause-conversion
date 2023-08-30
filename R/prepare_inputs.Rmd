@@ -107,10 +107,10 @@ brmort_dt =
                          labels = c( '<1', 
                                      paste0( c( 1, seq( 5, 75, 10 ) ),
                                              '-',
-                                             c( 4, seq( 9, 84, 10 ) ) ),
+                                             c( 4, seq( 14, 84, 10 ) ) ),
                                      '85+' ),
                          right = FALSE,
-                         inclue.lowst = TRUE ) ] %>%
+                         include.lowest = TRUE ) ] %>%
   .[ , cause_of_death := cause_dictionary[ causeOfDeath ] ] %>%
   .[ , .( nDx = sum( deaths ) ),
      .( country, state, year, cause_of_death, sex, age_group ) ]
@@ -124,10 +124,10 @@ brpop_dt =
                          labels = c( '<1', 
                                      paste0( c( 1, seq( 5, 75, 10 ) ),
                                              '-',
-                                             c( 4, seq( 9, 84, 10 ) ) ),
+                                             c( 4, seq( 14, 84, 10 ) ) ),
                                      '85+' ),
                          right = FALSE,
-                         inclue.lowst = TRUE ) ] %>%
+                         include.lowest = TRUE ) ] %>%
   .[ , 
      .( Ex = sum( pop ) ),
      .( country, state, year, sex, age_group ) 
