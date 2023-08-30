@@ -1,0 +1,211 @@
+---
+title: "Estimating cause-specific mortality from age mortality schedules"
+author: "Eugenio Paglino and Jose H C Monteiro da Silva"
+date: "\today"
+output:
+  html_document
+---
+
+```{r, echo=F, include=F}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+# Loading necessary packages
+rm( list = ls() )
+graphics.off()
+gc( reset = T )
+library(lubridate)
+library(here)
+library(ggrepel)
+library(tidyverse)
+library(data.table)
+# Set seed for the Rmd
+set.seed(42)
+```
+
+```{r}
+i_am('R/MainAnalysis.Rmd')
+inDir <- here('data','input')
+intermediateDir <- here('data','output')
+```
+```{r}
+
+cause_dictionary = 
+  c( 'HIV/AIDS' = 'HIV/AIDS',
+     'Other infectious and\nparasitic diseases' = 'Communicable diseases',
+     'Liver cancer' = 'Cancer',
+     'Lung cancer' = 'Cancer',
+     'Breast, prostate, colorectal,\nand cervical cancer' = 'Cancer',
+     'All other cancers' = 'Cancer',
+     'Mental disorders' = 'Mental disorders, nervous system, and Alzheimer',
+     "Nervous system, excl. Alzheimer's" = 'Mental disorders, nervous system, and Alzheimer',
+     "Alzheimer's disease" = 'Mental disorders, nervous system, and Alzheimer',
+     'Hypertensive heart disease' = 'Circulatory diseases',
+     'Circulatory diseases,\nexcl. Hypertensive heart disease' = 'Circulatory diseases',
+     'Respiratory diseases\nexcl. Influenza and pneumonia' = 'Respiratory diseases',
+     'Influenza and pneumonia' = 'Respiratory diseases',
+     'Diseases of the digestive system' = 'Diseases of the digestive system',
+     'Diabetes' = 'Metabolic diseases',
+     'Endocrine, nutritional,\nand metabolic diseases excl. Diabetes' = 'Metabolic diseases',
+     'Diseases of the genitourinary system' = 'Diseases of the genitourinary system',
+     'Perinatal conditions\nand congenital anomalies' = 'Perinatal conditions\nand congenital anomalies',
+     'Homicide' = 'External Causes',
+     'Suicide' = 'External Causes',
+     'Drug overdose' = 'External Causes',
+     'Alcohol-induced' = 'External Causes',
+     'Transport accidents' = 'External Causes',
+     'Other external causes' = 'External Causes',
+     'Symptoms, signs,\nand ill-defined conditions' = 'Garbage Codes',
+     'COVID-19' = 'COVID-19',
+     'All other causes' = 'Other',
+     'Total' = 'Total' )
+```
+
+```{r}
+
+us_dt = 
+  arrow::read_feather( here( intermediateDir, 'finalData.feather' ) ) %>%
+  setDT %>%
+  .[ , .( state,
+          year, sex, age_group = age, 
+          cause_of_death = cause_dictionary[ causeOfDeath ],
+          nDx = deaths,
+          Ex  = pop ) ] %>%
+  .[ , 
+     .(
+       nDx = sum( nDx ),
+       Ex  = sum( Ex )
+       ),
+     .( state, year, sex, age_group, cause_of_death ) ]
+
+br_dt = 
+  merge(
+    arrow::read_feather( here( intermediateDir, 'mortDataCleanBR.feather' ) ) 
+```
+
+```{r}
+ageSpecificRates <- finalData %>%
+  group_by(state,year,sex,age) %>%
+  summarise(deaths=sum(deaths),
+            pop=max(pop),
+            logm=log(deaths/pop)) %>%
+  ungroup() %>%
+  select(-c(deaths,pop)) %>%
+  pivot_wider(values_from = logm, names_from = age,names_prefix = 'logm')
+```
+
+```{r}
+finalData <- finalData %>%
+  filter(!(causeOfDeath %in% c('COVID-19','Total','HIV/AIDS')),
+         !(state %in% c('Vermont','North Dakota','Wyoming'))) %>%
+  group_by(state,year,sex, causeOfDeath) %>%
+  summarise(deaths=sum(deaths),
+            pop=max(pop),
+            logm=log(deaths/pop)) %>%
+  ungroup() %>%
+  left_join(ageSpecificRates,by=c('state','year','sex'))
+```
+
+```{r}
+set.seed(42)
+states <- unique(finalData$state)
+randStates <- sample(states,length(states))
+testStates <- randStates[1:floor(length(states)/4)]
+trainStates <- randStates[-1:-floor(length(states)/4)]
+```
+
+```{r}
+trainData <- finalData %>%
+  filter(state %in% trainStates)
+
+testData <- finalData %>%
+  filter(state %in% testStates)
+```
+
+```{r}
+# Construct data frame of state abbreviations + divisions, plus DC
+linearModel <- lm(logm ~ 1 + `logm<1` + `logm1-4` + `logm5-14` + `logm15-24` + 
+                    `logm25-34` + `logm35-44` + `logm45-54` + `logm55-64` + 
+                    `logm65-74` + `logm75-84` + `logm85+` +
+                    causeOfDeath +
+                    causeOfDeath:`logm<1` + causeOfDeath:`logm1-4` + 
+                    causeOfDeath:`logm5-14` + causeOfDeath:`logm15-24` + 
+                    causeOfDeath:`logm25-34` + causeOfDeath:`logm35-44` + 
+                    causeOfDeath:`logm45-54` + causeOfDeath:`logm55-64` + 
+                    causeOfDeath:`logm65-74` + causeOfDeath:`logm75-84` + 
+                    causeOfDeath:`logm85+`,
+                  data = trainData)
+```
+
+```{r}
+trainData <- trainData %>%
+  mutate(prediction = predict(linearModel))
+```
+
+```{r}
+trainData %>%
+  ggplot() +
+  geom_point(mapping=aes(x=logm,y=prediction),alpha=0.3) +
+  facet_wrap(~causeOfDeath) +
+  coord_equal(xlim = c(-10,-3),ylim=c(-10,-3))
+```
+
+```{r}
+trainData %>%
+  mutate(predDeaths = exp(prediction)*pop) %>%
+  group_by(causeOfDeath) %>%
+  summarise(deaths=sum(deaths),
+            predDeaths=sum(predDeaths)) %>%
+  ungroup() %>%
+  mutate(prop=deaths/sum(deaths),
+         predProp=predDeaths/sum(predDeaths))
+```
+
+
+```{r}
+testData <- testData %>%
+  mutate(prediction = predict(linearModel,testData))
+```
+
+```{r}
+testData %>%
+  ggplot() +
+  geom_point(mapping=aes(x=logm,y=prediction),alpha=0.3) +
+  facet_wrap(~causeOfDeath) +
+  coord_equal(xlim = c(-10,-3),ylim=c(-10,-3))
+```
+
+```{r}
+propData <- testData %>%
+  mutate(predDeaths = exp(prediction)*pop) %>%
+  group_by(causeOfDeath) %>%
+  summarise(deaths=sum(deaths),
+            predDeaths=sum(predDeaths)) %>%
+  ungroup() %>%
+  mutate(prop=deaths/sum(deaths),
+         predProp=predDeaths/sum(predDeaths))
+```
+
+```{r}
+predVsObsProps <- propData %>%
+  ggplot() +
+  geom_abline(intercept = 0,slope=1) +
+  geom_point(mapping=aes(x=prop,y=predProp)) +
+  geom_text_repel(mapping=aes(x=prop,y=predProp,label=causeOfDeath),
+                  min.segment.length=0) +
+  coord_trans(x='log10',y='log10') +
+  labs(y='Predicted Proportion of All Deaths',
+       x='Observed Proportion of All Deaths') +
+  theme_minimal()
+```
+
+```{r}
+ggsave(here('figures','predVsObsProps.png'),predVsObsProps,
+       bg='white')
+```
+

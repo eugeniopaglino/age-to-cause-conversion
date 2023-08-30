@@ -1,0 +1,149 @@
+---
+title: "Estimating cause-specific mortality from age mortality schedules"
+author: "Eugenio Paglino and Jose H C Monteiro da Silva"
+date: "\today"
+output:
+  html_document
+---
+
+```{r, echo=F, include=F}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+# Loading necessary packages
+rm( list = ls() )
+graphics.off()
+gc( reset = T )
+library(lubridate)
+library(here)
+library(ggrepel)
+library(tidyverse)
+library(data.table)
+# Set seed for the Rmd
+set.seed(42)
+```
+
+```{r}
+i_am('R/MainAnalysis.Rmd')
+inDir <- here('data','input')
+intermediateDir <- here('data','output')
+```
+```{r}
+
+cause_dictionary = 
+  c( 'HIV/AIDS' = 'HIV/AIDS',
+     'Other infectious and\nparasitic diseases' = 'Communicable diseases',
+     'Liver cancer' = 'Cancer',
+     'Lung cancer' = 'Cancer',
+     'Breast, prostate, colorectal,\nand cervical cancer' = 'Cancer',
+     'All other cancers' = 'Cancer',
+     'Mental disorders' = 'Mental disorders, nervous system, and Alzheimer',
+     "Nervous system, excl. Alzheimer's" = 'Mental disorders, nervous system, and Alzheimer',
+     "Alzheimer's disease" = 'Mental disorders, nervous system, and Alzheimer',
+     'Hypertensive heart disease' = 'Circulatory diseases',
+     'Circulatory diseases,\nexcl. Hypertensive heart disease' = 'Circulatory diseases',
+     'Respiratory diseases\nexcl. Influenza and pneumonia' = 'Respiratory diseases',
+     'Influenza and pneumonia' = 'Respiratory diseases',
+     'Diseases of the digestive system' = 'Diseases of the digestive system',
+     'Diabetes' = 'Metabolic diseases',
+     'Endocrine, nutritional,\nand metabolic diseases excl. Diabetes' = 'Metabolic diseases',
+     'Diseases of the genitourinary system' = 'Diseases of the genitourinary system',
+     'Perinatal conditions\nand congenital anomalies' = 'Perinatal conditions\nand congenital anomalies',
+     'Homicide' = 'External Causes',
+     'Suicide' = 'External Causes',
+     'Drug overdose' = 'External Causes',
+     'Alcohol-induced' = 'External Causes',
+     'Transport accidents' = 'External Causes',
+     'Other external causes' = 'External Causes',
+     'Symptoms, signs,\nand ill-defined conditions' = 'Garbage Codes',
+     'COVID-19' = 'COVID-19',
+     'All other causes' = 'Other',
+     'Total' = 'Total' )
+
+statebr_dictionary = 
+  c( 
+    '12' = 'AC', '27' = 'AL', '13' = 'AM', '16' = 'AP', 
+    '29' = 'BA', '23' = 'CE', '53' = 'DF', '32' = 'ES', 
+    '52' = 'GO', '21' = 'MA', '31' = 'MG', '50' = 'MS', 
+    '51' = 'MT', '15' = 'PA', '25' = 'PB', '26' = 'PE', 
+    '22' = 'PI', '41' = 'PR', '33' = 'RJ', '24' = 'RN', 
+    '11' = 'RO', '14' = 'RR', '43' = 'RS', '42' = 'SC', 
+    '28' = 'SE', '35' = 'SP', '17' = 'TO' ) 
+
+```
+
+```{r}
+
+# US Data
+us_dt = 
+  arrow::read_feather( here( intermediateDir, 'finalData.feather' ) ) %>%
+  setDT %>%
+  .[ , .( country = 'US',
+          state,
+          year, sex, age_group = age, 
+          cause_of_death = cause_dictionary[ causeOfDeath ],
+          nDx = deaths,
+          Ex  = pop ) ] %>%
+  .[ , 
+     .(
+       nDx = sum( nDx ),
+       Ex  = sum( Ex )
+       ),
+     .( country, state, year, sex, age_group, cause_of_death ) ]
+
+# BR Data
+brmort_dt = 
+  arrow::read_feather( here( intermediateDir, 'mortDataCleanBR.feather' ) ) %>%
+  setDT %>%
+  .[ , country := 'BR' ] %>%
+  .[ , state := statebr_dictionary[ state ] ] %>%
+  .[ , age_group := cut( age,
+                         breaks = c( 0, 1, seq( 5, 85, 10 ), 120 ),
+                         labels = c( '<1', 
+                                     paste0( c( 1, seq( 5, 75, 10 ) ),
+                                             '-',
+                                             c( 4, seq( 9, 84, 10 ) ) ),
+                                     '85+' ),
+                         right = FALSE,
+                         inclue.lowst = TRUE ) ] %>%
+  .[ , cause_of_death := cause_dictionary[ causeOfDeath ] ] %>%
+  .[ , .( nDx = sum( deaths ) ),
+     .( country, state, year, cause_of_death, sex, age_group ) ]
+
+brpop_dt = 
+  arrow::read_feather( here( intermediateDir, 'popDataCleanBR.feather' ) ) %>%
+  setDT %>%
+  .[ , country := 'BR' ] %>%
+  .[ , age_group := cut( age,
+                         breaks = c( 0, 1, seq( 5, 85, 10 ), 120 ),
+                         labels = c( '<1', 
+                                     paste0( c( 1, seq( 5, 75, 10 ) ),
+                                             '-',
+                                             c( 4, seq( 9, 84, 10 ) ) ),
+                                     '85+' ),
+                         right = FALSE,
+                         inclue.lowst = TRUE ) ] %>%
+  .[ , 
+     .( Ex = sum( pop ) ),
+     .( country, state, year, sex, age_group ) 
+     ]
+  
+br_dt = 
+  brmort_dt %>%
+  merge( brpop_dt,
+         by = c( 'country', 'state', 'year', 'sex', 'age_group' )
+  ) %>%
+  setorder( country, state, year, sex, cause_of_death, age_group )
+
+# final
+final_dt =
+  rbind( us_dt, br_dt ) %>%
+  setorder( country, state, year, sex, cause_of_death, age_group )
+
+final_dt %>% arrow::write_feather( here( intermediateDir, 'final_input_clean.feather' ) ) 
+```
